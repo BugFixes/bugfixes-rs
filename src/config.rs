@@ -40,6 +40,10 @@ impl Config {
     pub fn log_endpoint(&self) -> String {
         format!("{}/log", self.server.trim_end_matches('/'))
     }
+
+    pub fn bug_endpoint(&self) -> String {
+        format!("{}/bug", self.server.trim_end_matches('/'))
+    }
 }
 
 #[cfg(test)]
@@ -85,6 +89,7 @@ mod tests {
                 assert_eq!(cfg.log_level, "warn");
                 assert!(cfg.local_only);
                 assert_eq!(cfg.log_endpoint(), "https://example.test/v1/log");
+                assert_eq!(cfg.bug_endpoint(), "https://example.test/v1/bug");
             },
         );
     }

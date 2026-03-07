@@ -8,6 +8,7 @@ Current scope:
 - caller file/line capture
 - level filtering
 - optional remote reporting to `POST /log`
+- optional panic/bug reporting to `POST /bug`
 - error/fatal helpers
 
 Not ported yet:
@@ -47,6 +48,20 @@ Use `BugfixesLogger::from_env()` to enable remote reporting through:
 - `BUGFIXES_LOG_LEVEL`
 - `BUGFIXES_LOCAL_ONLY`
 - `BUGFIXES_SERVER`
+
+Panic capture is available either explicitly:
+
+```rust
+let logger = BugfixesLogger::from_env()?;
+let _ = logger.report_panic_payload(&"worker crashed");
+```
+
+or through a global hook:
+
+```rust
+bugfixes_logs::init_global_from_env()?;
+bugfixes_logs::install_global_panic_hook();
+```
 
 ## API shape
 

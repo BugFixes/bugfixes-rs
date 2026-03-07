@@ -3,8 +3,8 @@ mod logger;
 
 pub use config::{Config, DEFAULT_SERVER};
 pub use logger::{
-    BugfixesError, BugfixesLogger, Level, LogRecord, ReportError, global_logger, init_global,
-    init_global_from_env, init_global_local,
+    BugReport, BugfixesError, BugfixesLogger, Level, LogRecord, ReportError, global_logger,
+    init_global, init_global_from_env, init_global_local, install_global_panic_hook,
 };
 
 #[doc(hidden)]

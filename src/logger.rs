@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::backtrace::Backtrace;
 use std::fmt;
 use std::io::{self, IsTerminal};
-use std::panic::Location;
+use std::panic::{Location, PanicHookInfo};
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -144,6 +144,17 @@ pub struct LogRecord {
     pub stack: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BugReport {
+    pub bug: String,
+    pub raw: String,
+    pub bug_line: String,
+    pub file: String,
+    pub line: String,
+    pub line_number: u32,
+    pub level: String,
+}
+
 static GLOBAL_LOGGER: OnceLock<BugfixesLogger> = OnceLock::new();
 
 #[derive(Clone)]
@@ -211,6 +222,39 @@ impl BugfixesLogger {
         panic!("{message}");
     }
 
+    pub fn report_bug(&self, bug: BugReport) -> Result<(), ReportError> {
+        if self.config.local_only {
+            return Ok(());
+        }
+
+        self.send_bug(&bug)
+    }
+
+    pub fn report_panic_payload(
+        &self,
+        payload: &(dyn std::any::Any + Send),
+    ) -> Result<(), ReportError> {
+        let message = panic_payload_message(payload);
+        let stack = capture_stack();
+        print_panic(&message, &stack);
+
+        if self.config.local_only {
+            return Ok(());
+        }
+
+        let bug = build_bug_report(Level::Crash, &message, &stack);
+        self.send_bug(&bug)
+    }
+
+    pub fn install_panic_hook(&self) {
+        let logger = self.clone();
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            logger.report_panic_hook(info);
+            previous(info);
+        }));
+    }
+
     #[track_caller]
     pub fn record(&self, level: Level, message: impl Into<String>) -> LogRecord {
         let location = Location::caller();
@@ -239,6 +283,18 @@ impl BugfixesLogger {
         Ok(format!("{}: {}", level.display_name(), record.log))
     }
 
+    fn report_panic_hook(&self, info: &PanicHookInfo<'_>) {
+        let message = panic_hook_message(info);
+        let stack = capture_stack();
+        print_panic(&message, &stack);
+        if self.config.local_only {
+            return;
+        }
+
+        let bug = build_bug_report(Level::Crash, &message, &stack);
+        let _ = self.send_bug(&bug);
+    }
+
     fn should_report(&self, level: Level) -> bool {
         if self.config.local_only {
             return false;
@@ -259,6 +315,22 @@ impl BugfixesLogger {
             .header("X-API-KEY", &self.config.agent_key)
             .header("X-API-SECRET", &self.config.agent_secret)
             .json(record)
+            .send()
+            .map(|_| ())
+            .map_err(ReportError::Http)
+    }
+
+    fn send_bug(&self, bug: &BugReport) -> Result<(), ReportError> {
+        if self.config.agent_key.is_empty() || self.config.agent_secret.is_empty() {
+            return Err(ReportError::MissingCredentials);
+        }
+
+        self.client
+            .post(self.config.bug_endpoint())
+            .header("Content-Type", "application/json")
+            .header("X-API-KEY", &self.config.agent_key)
+            .header("X-API-SECRET", &self.config.agent_secret)
+            .json(bug)
             .send()
             .map(|_| ())
             .map_err(ReportError::Http)
@@ -284,6 +356,10 @@ pub fn global_logger() -> &'static BugfixesLogger {
         BugfixesLogger::from_env()
             .expect("failed to initialize global Bugfixes logger from environment")
     })
+}
+
+pub fn install_global_panic_hook() {
+    global_logger().install_panic_hook();
 }
 
 fn render_logfmt(level: Level, file: &str, line: u32, message: &str) -> String {
@@ -324,6 +400,18 @@ fn print_record(record: &LogRecord) {
         eprintln!("{}", colorize("Stack:", ANSI_BRIGHT_MAGENTA, use_color));
         eprint!("{}", render_pretty_stack(stack, use_color));
     }
+}
+
+fn print_panic(message: &str, stack: &str) {
+    let use_color = io::stderr().is_terminal();
+    eprintln!();
+    eprintln!(
+        "{} {}",
+        colorize("panic:", ANSI_BRIGHT_CYAN, use_color),
+        colorize(message, ANSI_BRIGHT_RED, use_color)
+    );
+    eprintln!();
+    eprint!("{}", render_pretty_stack(stack, use_color));
 }
 
 fn capitalize(value: &str) -> String {
@@ -393,6 +481,70 @@ fn render_pretty_stack(stack: &str, use_color: bool) -> String {
     }
 
     out
+}
+
+fn build_bug_report(level: Level, message: &str, stack: &str) -> BugReport {
+    let source = first_source_line(stack).unwrap_or_default();
+    let (file, line, line_number) = parse_bug_line(&source);
+
+    BugReport {
+        bug: format!("panic: {message}\n\n{}", render_pretty_stack(stack, false)),
+        raw: stack.to_string(),
+        bug_line: source,
+        file,
+        line,
+        line_number,
+        level: level.as_str().to_string(),
+    }
+}
+
+fn first_source_line(stack: &str) -> Option<String> {
+    stack.lines().map(str::trim).find_map(|line| {
+        parse_backtrace_source_line(line).map(|source| {
+            source
+                .split_once(" + ")
+                .map(|(path, _)| path)
+                .unwrap_or(source)
+                .to_string()
+        })
+    })
+}
+
+fn parse_bug_line(source: &str) -> (String, String, u32) {
+    let mut parts = source.rsplitn(3, ':');
+    let column = parts.next();
+    let line = parts.next();
+    let file = parts.next();
+
+    match (file, line, column) {
+        (Some(file), Some(line), Some(_column)) => {
+            let line_number = line.parse::<u32>().unwrap_or_default();
+            (file.to_string(), line.to_string(), line_number)
+        }
+        _ => (String::new(), String::new(), 0),
+    }
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "Box<dyn Any>".to_string()
+    }
+}
+
+fn panic_hook_message(info: &PanicHookInfo<'_>) -> String {
+    if let Some(message) = info.payload().downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else if let Some(message) = info.payload().downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(location) = info.location() {
+        format!("panic at {}:{}", location.file(), location.line())
+    } else {
+        "panic".to_string()
+    }
 }
 
 fn parse_backtrace_function_line(line: &str) -> Option<&str> {
@@ -474,10 +626,11 @@ fn split_source_path(source: &str) -> (String, String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSI_BRIGHT_CYAN, BugfixesLogger, Level, ReportError, capitalize, color_level_label,
-        colorize, global_logger, init_global, parse_backtrace_function_line,
-        parse_backtrace_source_line, quote_logfmt, render_logfmt, render_pretty_stack,
-        split_function_path, split_source_path,
+        ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, ReportError, build_bug_report,
+        capitalize, color_level_label, colorize, first_source_line, global_logger, init_global,
+        panic_payload_message, parse_backtrace_function_line, parse_backtrace_source_line,
+        parse_bug_line, quote_logfmt, render_logfmt, render_pretty_stack, split_function_path,
+        split_source_path,
     };
     use crate::Config;
 
@@ -569,6 +722,41 @@ mod tests {
         let stack = "   0: app::worker::run\n             at /workspace/src/worker.rs:42:7\n";
         let rendered = render_pretty_stack(stack, true);
         assert!(rendered.contains("\x1b["));
+    }
+
+    #[test]
+    fn bug_report_extracts_first_source_location() {
+        let stack = "\
+   0: app::worker::run\n\
+             at /workspace/src/worker.rs:42:7\n\
+   1: std::rt::lang_start::{{closure}}\n";
+        let bug = build_bug_report(Level::Crash, "boom", stack);
+        assert_eq!(
+            bug,
+            BugReport {
+                bug: "panic: boom\n\n -> app::worker::run\n ->   /workspace/src/worker.rs:42:7\n    std::rt::lang_start::{{closure}}\n"
+                    .to_string(),
+                raw: stack.to_string(),
+                bug_line: "/workspace/src/worker.rs:42:7".to_string(),
+                file: "/workspace/src/worker.rs".to_string(),
+                line: "42".to_string(),
+                line_number: 42,
+                level: "crash".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn bug_location_helpers_handle_missing_source_lines() {
+        assert_eq!(first_source_line("   0: app::main"), None);
+        assert_eq!(parse_bug_line(""), (String::new(), String::new(), 0));
+    }
+
+    #[test]
+    fn panic_payload_message_supports_strings() {
+        let owned = String::from("owned panic");
+        assert_eq!(panic_payload_message(&owned), "owned panic");
+        assert_eq!(panic_payload_message(&"static panic"), "static panic");
     }
 
     #[test]

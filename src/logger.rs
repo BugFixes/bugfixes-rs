@@ -3,6 +3,7 @@ use reqwest::blocking::Client;
 use serde::Serialize;
 use std::backtrace::Backtrace;
 use std::fmt;
+use std::io::{self, IsTerminal};
 use std::panic::Location;
 use std::sync::OnceLock;
 
@@ -59,7 +60,10 @@ impl Level {
     }
 
     pub fn captures_stack(self) -> bool {
-        matches!(self, Self::Debug | Self::Warn | Self::Error | Self::Crash | Self::Fatal)
+        matches!(
+            self,
+            Self::Debug | Self::Warn | Self::Error | Self::Crash | Self::Fatal
+        )
     }
 }
 
@@ -119,7 +123,9 @@ pub enum ReportError {
 impl fmt::Display for ReportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingCredentials => f.write_str("missing BUGFIXES_AGENT_KEY or BUGFIXES_AGENT_SECRET"),
+            Self::MissingCredentials => {
+                f.write_str("missing BUGFIXES_AGENT_KEY or BUGFIXES_AGENT_SECRET")
+            }
             Self::Http(err) => write!(f, "http error: {err}"),
         }
     }
@@ -275,7 +281,8 @@ pub fn init_global_local() -> Result<&'static BugfixesLogger, reqwest::Error> {
 
 pub fn global_logger() -> &'static BugfixesLogger {
     GLOBAL_LOGGER.get_or_init(|| {
-        BugfixesLogger::from_env().expect("failed to initialize global Bugfixes logger from environment")
+        BugfixesLogger::from_env()
+            .expect("failed to initialize global Bugfixes logger from environment")
     })
 }
 
@@ -305,15 +312,17 @@ fn capture_stack() -> String {
 }
 
 fn print_record(record: &LogRecord) {
+    let use_color = io::stderr().is_terminal();
     eprintln!(
         "{}: {} >> {}:{}",
-        capitalize(&record.level),
+        color_level_label(&record.level, use_color),
         record.log,
         record.file,
         record.line_number
     );
-    if record.stack.is_some() {
-        eprintln!("Stack captured");
+    if let Some(stack) = &record.stack {
+        eprintln!("{}", colorize("Stack:", ANSI_BRIGHT_MAGENTA, use_color));
+        eprint!("{}", render_pretty_stack(stack, use_color));
     }
 }
 
@@ -325,11 +334,150 @@ fn capitalize(value: &str) -> String {
     }
 }
 
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_YELLOW: &str = "\x1b[33m";
+const ANSI_BRIGHT_RED: &str = "\x1b[31;1m";
+const ANSI_BRIGHT_GREEN: &str = "\x1b[32;1m";
+const ANSI_BRIGHT_YELLOW: &str = "\x1b[33;1m";
+const ANSI_BRIGHT_MAGENTA: &str = "\x1b[35;1m";
+const ANSI_BRIGHT_CYAN: &str = "\x1b[36;1m";
+const ANSI_BRIGHT_WHITE: &str = "\x1b[37;1m";
+
+fn colorize(input: &str, ansi: &str, use_color: bool) -> String {
+    if use_color {
+        format!("{ansi}{input}{ANSI_RESET}")
+    } else {
+        input.to_string()
+    }
+}
+
+fn color_level_label(level: &str, use_color: bool) -> String {
+    let label = capitalize(level);
+    let ansi = match level {
+        "warn" => ANSI_BRIGHT_YELLOW,
+        "info" => ANSI_BRIGHT_CYAN,
+        "log" => ANSI_BRIGHT_GREEN,
+        "debug" => ANSI_BRIGHT_MAGENTA,
+        "error" | "crash" | "fatal" => ANSI_BRIGHT_RED,
+        _ => ANSI_BRIGHT_WHITE,
+    };
+    colorize(&label, ansi, use_color)
+}
+
+fn render_pretty_stack(stack: &str, use_color: bool) -> String {
+    let mut out = String::new();
+    let mut line_index = 0usize;
+
+    for raw_line in stack.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(function) = parse_backtrace_function_line(trimmed) {
+            out.push_str(&decorate_func_call_line(function, use_color, line_index));
+            line_index += 1;
+            continue;
+        }
+
+        if let Some(source) = parse_backtrace_source_line(trimmed) {
+            out.push_str(&decorate_source_line(source, use_color, line_index));
+            line_index += 1;
+            continue;
+        }
+
+        out.push_str("    ");
+        out.push_str(trimmed);
+        out.push('\n');
+        line_index += 1;
+    }
+
+    out
+}
+
+fn parse_backtrace_function_line(line: &str) -> Option<&str> {
+    let (index, function) = line.split_once(':')?;
+    if index.trim().parse::<usize>().is_ok() {
+        Some(function.trim())
+    } else {
+        None
+    }
+}
+
+fn parse_backtrace_source_line(line: &str) -> Option<&str> {
+    line.strip_prefix("at ")
+}
+
+fn decorate_func_call_line(line: &str, use_color: bool, num: usize) -> String {
+    let (pkg, method) = split_function_path(line);
+    let mut out = String::new();
+
+    if num == 0 {
+        out.push_str(&colorize(" -> ", ANSI_BRIGHT_RED, use_color));
+        out.push_str(&colorize(pkg, ANSI_BRIGHT_MAGENTA, use_color));
+        out.push_str(&colorize(method, ANSI_BRIGHT_RED, use_color));
+    } else {
+        out.push_str("    ");
+        out.push_str(&colorize(pkg, ANSI_YELLOW, use_color));
+        out.push_str(&colorize(method, ANSI_BRIGHT_GREEN, use_color));
+    }
+    out.push('\n');
+    out
+}
+
+fn decorate_source_line(line: &str, use_color: bool, num: usize) -> String {
+    let mut out = String::new();
+    let (dir, file, line_no) = split_source_path(line);
+
+    if num == 1 {
+        out.push_str(&colorize(" ->   ", ANSI_BRIGHT_RED, use_color));
+        out.push_str(&colorize(&dir, ANSI_BRIGHT_WHITE, use_color));
+        out.push_str(&colorize(&file, ANSI_BRIGHT_RED, use_color));
+        out.push_str(&colorize(&line_no, ANSI_BRIGHT_MAGENTA, use_color));
+    } else {
+        out.push_str("      ");
+        out.push_str(&colorize(&dir, ANSI_BRIGHT_WHITE, use_color));
+        out.push_str(&colorize(&file, ANSI_BRIGHT_CYAN, use_color));
+        out.push_str(&colorize(&line_no, ANSI_BRIGHT_GREEN, use_color));
+    }
+    out.push('\n');
+    out
+}
+
+fn split_function_path(function: &str) -> (&str, &str) {
+    if let Some(idx) = function.rfind("::") {
+        (&function[..idx + 2], &function[idx + 2..])
+    } else {
+        ("", function)
+    }
+}
+
+fn split_source_path(source: &str) -> (String, String, String) {
+    let (path, suffix) = source
+        .rsplit_once(':')
+        .and_then(|(head, col)| col.parse::<u32>().ok().map(|_| (head, col)))
+        .and_then(|(head, col)| head.rsplit_once(':').map(|(path, line)| (path, line, col)))
+        .map(|(path, line, col)| (path, format!(":{line}:{col}")))
+        .unwrap_or_else(|| (source, String::new()));
+
+    if let Some(idx) = path.rfind('/') {
+        (
+            path[..idx + 1].to_string(),
+            path[idx + 1..].to_string(),
+            suffix,
+        )
+    } else {
+        (String::new(), path.to_string(), suffix)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BugfixesLogger, Level, ReportError, capitalize, global_logger, init_global, quote_logfmt,
-        render_logfmt,
+        ANSI_BRIGHT_CYAN, BugfixesLogger, Level, ReportError, capitalize, color_level_label,
+        colorize, global_logger, init_global, parse_backtrace_function_line,
+        parse_backtrace_source_line, quote_logfmt, render_logfmt, render_pretty_stack,
+        split_function_path, split_source_path,
     };
     use crate::Config;
 
@@ -373,6 +521,8 @@ mod tests {
     #[test]
     fn logger_remote_requires_credentials() {
         let logger = BugfixesLogger::new(Config {
+            agent_key: String::new(),
+            agent_secret: String::new(),
             local_only: false,
             log_level: "info".into(),
             ..Config::default()
@@ -400,16 +550,76 @@ mod tests {
     }
 
     #[test]
+    fn pretty_stack_renders_function_and_source_lines() {
+        let stack = "\
+   0: app::worker::run\n\
+             at /workspace/src/worker.rs:42:7\n\
+   1: std::rt::lang_start::{{closure}}\n\
+             at /rustc/library/std/src/rt.rs:171:5\n";
+
+        let rendered = render_pretty_stack(stack, false);
+        assert!(rendered.contains(" -> app::worker::"));
+        assert!(rendered.contains("run"));
+        assert!(rendered.contains("/workspace/src/worker.rs"));
+        assert!(rendered.contains(":42:7"));
+    }
+
+    #[test]
+    fn pretty_stack_with_color_includes_ansi_sequences() {
+        let stack = "   0: app::worker::run\n             at /workspace/src/worker.rs:42:7\n";
+        let rendered = render_pretty_stack(stack, true);
+        assert!(rendered.contains("\x1b["));
+    }
+
+    #[test]
+    fn backtrace_line_parsers_match_rust_format() {
+        assert_eq!(
+            parse_backtrace_function_line("   12: app::main"),
+            Some("app::main")
+        );
+        assert_eq!(
+            parse_backtrace_source_line("at /workspace/src/main.rs:10:5"),
+            Some("/workspace/src/main.rs:10:5")
+        );
+        assert_eq!(parse_backtrace_function_line("app::main"), None);
+    }
+
+    #[test]
+    fn path_splitters_keep_package_and_line_suffixes() {
+        assert_eq!(
+            split_function_path("app::worker::run"),
+            ("app::worker::", "run")
+        );
+        assert_eq!(
+            split_source_path("/workspace/src/main.rs:10:5"),
+            (
+                "/workspace/src/".to_string(),
+                "main.rs".to_string(),
+                ":10:5".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn logfmt_rendering_quotes_when_needed() {
         assert_eq!(quote_logfmt("simple/path.rs"), "simple/path.rs");
         assert_eq!(quote_logfmt("hello world"), "\"hello world\"");
-        assert!(render_logfmt(Level::Info, "src/main.rs", 42, "hello world").contains("msg=\"hello world\""));
+        assert!(
+            render_logfmt(Level::Info, "src/main.rs", 42, "hello world")
+                .contains("msg=\"hello world\"")
+        );
     }
 
     #[test]
     fn capitalize_handles_empty_strings() {
         assert_eq!(capitalize("warn"), "Warn");
         assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
+    fn color_helpers_fall_back_without_tty() {
+        assert_eq!(colorize("Info", ANSI_BRIGHT_CYAN, false), "Info");
+        assert_eq!(color_level_label("info", false), "Info");
     }
 
     #[test]

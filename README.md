@@ -13,7 +13,6 @@ Current scope:
 Not ported yet:
 
 - Go HTTP middleware utilities
-- colored pretty-stack rendering parity
 - framework-specific integrations
 
 ## Install

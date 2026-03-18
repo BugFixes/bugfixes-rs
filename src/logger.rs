@@ -290,6 +290,7 @@ impl BugfixesLogger {
     fn report_panic_hook(&self, info: &PanicHookInfo<'_>) {
         let message = panic_hook_message(info);
         let stack = capture_stack();
+        print_panic(&message, &stack);
         if self.config.local_only {
             return;
         }

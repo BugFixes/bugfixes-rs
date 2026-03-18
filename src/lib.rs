@@ -5,6 +5,7 @@ pub use config::{Config, DEFAULT_SERVER};
 pub use logger::{
     BugReport, BugfixesError, BugfixesLogger, Level, LogRecord, ReportError, global_logger,
     init_global, init_global_from_env, init_global_local, install_global_panic_hook,
+    local_logger,
 };
 
 #[doc(hidden)]

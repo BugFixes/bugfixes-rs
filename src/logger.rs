@@ -3,7 +3,7 @@ use reqwest::blocking::Client;
 use serde::Serialize;
 use std::backtrace::Backtrace;
 use std::fmt;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::panic::{Location, PanicHookInfo};
 use std::sync::OnceLock;
 
@@ -156,6 +156,7 @@ pub struct BugReport {
 }
 
 static GLOBAL_LOGGER: OnceLock<BugfixesLogger> = OnceLock::new();
+static LOCAL_LOGGER: OnceLock<BugfixesLogger> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct BugfixesLogger {
@@ -358,6 +359,12 @@ pub fn global_logger() -> &'static BugfixesLogger {
     })
 }
 
+pub fn local_logger() -> &'static BugfixesLogger {
+    LOCAL_LOGGER.get_or_init(|| {
+        BugfixesLogger::local().expect("failed to initialize local Bugfixes logger")
+    })
+}
+
 pub fn install_global_panic_hook() {
     global_logger().install_panic_hook();
 }
@@ -389,16 +396,12 @@ fn capture_stack() -> String {
 
 fn print_record(record: &LogRecord) {
     let use_color = io::stderr().is_terminal();
-    eprintln!(
-        "{}: {} >> {}:{}",
-        color_level_label(&record.level, use_color),
-        record.log,
-        record.file,
-        record.line_number
-    );
-    if let Some(stack) = &record.stack {
-        eprintln!("{}", colorize("Stack:", ANSI_BRIGHT_MAGENTA, use_color));
-        eprint!("{}", render_pretty_stack(stack, use_color));
+    let output = render_record(record, use_color);
+
+    if level_uses_stdout(&record.level) {
+        let _ = io::stdout().write_all(output.as_bytes());
+    } else {
+        let _ = io::stderr().write_all(output.as_bytes());
     }
 }
 
@@ -420,6 +423,28 @@ fn capitalize(value: &str) -> String {
         Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
         None => String::new(),
     }
+}
+
+fn render_record(record: &LogRecord, use_color: bool) -> String {
+    let mut output = format!(
+        "{}: {} >> {}:{}\n",
+        color_level_label(&record.level, use_color),
+        record.log,
+        record.file,
+        record.line_number
+    );
+
+    if let Some(stack) = &record.stack {
+        output.push_str(&colorize("Stack:", ANSI_BRIGHT_MAGENTA, use_color));
+        output.push('\n');
+        output.push_str(&render_pretty_stack(stack, use_color));
+    }
+
+    output
+}
+
+fn level_uses_stdout(level: &str) -> bool {
+    matches!(level, "debug" | "log" | "info")
 }
 
 const ANSI_RESET: &str = "\x1b[0m";
@@ -628,9 +653,9 @@ mod tests {
     use super::{
         ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, ReportError, build_bug_report,
         capitalize, color_level_label, colorize, first_source_line, global_logger, init_global,
-        panic_payload_message, parse_backtrace_function_line, parse_backtrace_source_line,
-        parse_bug_line, quote_logfmt, render_logfmt, render_pretty_stack, split_function_path,
-        split_source_path,
+        level_uses_stdout, local_logger, panic_payload_message, parse_backtrace_function_line,
+        parse_backtrace_source_line, parse_bug_line, quote_logfmt, render_logfmt,
+        render_pretty_stack, split_function_path, split_source_path,
     };
     use crate::Config;
 
@@ -811,6 +836,15 @@ mod tests {
     }
 
     #[test]
+    fn info_levels_use_stdout() {
+        assert!(level_uses_stdout("debug"));
+        assert!(level_uses_stdout("log"));
+        assert!(level_uses_stdout("info"));
+        assert!(!level_uses_stdout("warn"));
+        assert!(!level_uses_stdout("error"));
+    }
+
+    #[test]
     fn global_init_is_available() {
         let logger = BugfixesLogger::new(Config {
             local_only: true,
@@ -821,5 +855,11 @@ mod tests {
         let global = init_global(logger).unwrap_or_else(|_| global_logger());
         let response = global.info("global logger").expect("info");
         assert_eq!(response, "Info: global logger");
+    }
+
+    #[test]
+    fn local_logger_always_skips_remote_reporting() {
+        let response = local_logger().info("local only").expect("info");
+        assert_eq!(response, "Info: local only");
     }
 }

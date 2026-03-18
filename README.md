@@ -1,4 +1,4 @@
-# bugfixes-logs
+# bugfixes
 
 Rust logging client for Bugfixes, extracted from the behavior of the Go `logs` package in this repository.
 
@@ -20,21 +20,24 @@ Not ported yet:
 
 ```toml
 [dependencies]
-bugfixes-logs = { path = "rust/bugfixes-logs" }
+bugfixes = "0.1.0"
 ```
 
 ## Example
 
 ```rust
-use bugfixes_logs::{BugfixesLogger, init_global_local};
+use bugfixes::{BugfixesLogger, init_global_local, local_logger};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let logger = BugfixesLogger::local()?;
     let line = logger.info("server started on :3000")?;
     assert_eq!(line, "Info: server started on :3000");
 
+    let local_line = local_logger().info("stdout only")?;
+    assert_eq!(local_line, "Info: stdout only");
+
     init_global_local()?;
-    let line = bugfixes_logs::info!("server started on {}", ":3000")?;
+    let line = bugfixes::info!("server started on {}", ":3000")?;
     assert_eq!(line, "Info: server started on :3000");
 
     Ok(())
@@ -59,8 +62,8 @@ let _ = logger.report_panic_payload(&"worker crashed");
 or through a global hook:
 
 ```rust
-bugfixes_logs::init_global_from_env()?;
-bugfixes_logs::install_global_panic_hook();
+bugfixes::init_global_from_env()?;
+bugfixes::install_global_panic_hook();
 ```
 
 ## API shape
@@ -69,12 +72,13 @@ The crate supports both:
 
 - explicit logger instances, which are best for libraries and dependency injection
 - global macros, which are the most idiomatic application-facing Rust API
+- `local_logger()`, which is the direct local-only equivalent of Go's `logs.Local()`
 
 The macros preserve the Go package's functional intent while fitting normal Rust call patterns:
 
 ```rust
-bugfixes_logs::debug!("loaded {}", 3);
-bugfixes_logs::info!("started");
-bugfixes_logs::warn!("slow request");
-bugfixes_logs::error!("db error: {}", "timeout")?;
+bugfixes::debug!("loaded {}", 3);
+bugfixes::info!("started");
+bugfixes::warn!("slow request");
+bugfixes::error!("db error: {}", "timeout")?;
 ```

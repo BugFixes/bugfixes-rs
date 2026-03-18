@@ -7,7 +7,7 @@ use std::future::Future;
 use std::io::{self, IsTerminal, Write};
 use std::panic::{Location, PanicHookInfo};
 use std::sync::OnceLock;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use tokio::runtime::Builder;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -121,6 +121,8 @@ impl std::error::Error for BugfixesError {}
 pub enum ReportError {
     MissingCredentials,
     Http(reqwest::Error),
+    RuntimeInit(String),
+    ThreadJoin,
 }
 
 impl fmt::Display for ReportError {
@@ -130,6 +132,8 @@ impl fmt::Display for ReportError {
                 f.write_str("missing BUGFIXES_AGENT_KEY or BUGFIXES_AGENT_SECRET")
             }
             Self::Http(err) => write!(f, "http error: {err}"),
+            Self::RuntimeInit(err) => write!(f, "runtime init error: {err}"),
+            Self::ThreadJoin => f.write_str("report thread panicked"),
         }
     }
 }
@@ -247,7 +251,7 @@ impl BugfixesLogger {
         }
 
         let bug = build_bug_report(Level::Crash, &message, &stack);
-        self.send_bug(&bug)
+        self.send_bug_blocking(&bug)
     }
 
     pub fn install_panic_hook(&self) {
@@ -282,7 +286,11 @@ impl BugfixesLogger {
     fn emit(&self, level: Level, message: String) -> Result<String, ReportError> {
         let record = self.record(level, message);
         if self.should_report(level) {
-            self.send(&record)?;
+            if level == Level::Fatal {
+                self.send_blocking(&record)?;
+            } else {
+                self.send(&record)?;
+            }
         }
         Ok(format!("{}: {}", level.display_name(), record.log))
     }
@@ -296,7 +304,7 @@ impl BugfixesLogger {
         }
 
         let bug = build_bug_report(Level::Crash, &message, &stack);
-        let _ = self.send_bug(&bug);
+        let _ = self.send_bug_blocking(&bug);
     }
 
     fn should_report(&self, level: Level) -> bool {
@@ -315,13 +323,24 @@ impl BugfixesLogger {
 
         let logger = self.clone();
         let record = record.clone();
-        spawn_report_thread(async move {
+        let _ = spawn_report_thread(async move {
             if let Err(err) = logger.send_async(record).await {
                 eprintln!("bugfixes sendLog: {err}");
             }
+            Ok(())
         });
 
         Ok(())
+    }
+
+    fn send_blocking(&self, record: &LogRecord) -> Result<(), ReportError> {
+        if !self.has_credentials() {
+            return Ok(());
+        }
+
+        let logger = self.clone();
+        let record = record.clone();
+        join_report_thread(spawn_report_thread(async move { logger.send_async(record).await }))
     }
 
     fn send_bug(&self, bug: &BugReport) -> Result<(), ReportError> {
@@ -331,13 +350,24 @@ impl BugfixesLogger {
 
         let logger = self.clone();
         let bug = bug.clone();
-        spawn_report_thread(async move {
+        let _ = spawn_report_thread(async move {
             if let Err(err) = logger.send_bug_async(bug).await {
                 eprintln!("bugfixes sendBug: {err}");
             }
+            Ok(())
         });
 
         Ok(())
+    }
+
+    fn send_bug_blocking(&self, bug: &BugReport) -> Result<(), ReportError> {
+        if !self.has_credentials() {
+            return Ok(());
+        }
+
+        let logger = self.clone();
+        let bug = bug.clone();
+        join_report_thread(spawn_report_thread(async move { logger.send_bug_async(bug).await }))
     }
 
     async fn send_async(&self, record: LogRecord) -> Result<(), ReportError> {
@@ -414,11 +444,20 @@ pub fn install_global_panic_hook() {
     global_logger().install_panic_hook();
 }
 
-fn spawn_report_thread(task: impl Future<Output = ()> + Send + 'static) {
-    thread::spawn(move || match Builder::new_current_thread().enable_all().build() {
-        Ok(runtime) => runtime.block_on(task),
-        Err(err) => eprintln!("bugfixes runtime init failed: {err}"),
-    });
+fn spawn_report_thread(
+    task: impl Future<Output = Result<(), ReportError>> + Send + 'static,
+) -> JoinHandle<Result<(), ReportError>> {
+    thread::spawn(move || {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| ReportError::RuntimeInit(err.to_string()))?;
+        runtime.block_on(task)
+    })
+}
+
+fn join_report_thread(handle: JoinHandle<Result<(), ReportError>>) -> Result<(), ReportError> {
+    handle.join().map_err(|_| ReportError::ThreadJoin)?
 }
 
 fn render_logfmt(level: Level, file: &str, line: u32, message: &str) -> String {

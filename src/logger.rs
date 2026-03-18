@@ -1,11 +1,14 @@
 use crate::config::Config;
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::Serialize;
 use std::backtrace::Backtrace;
 use std::fmt;
+use std::future::Future;
 use std::io::{self, IsTerminal, Write};
 use std::panic::{Location, PanicHookInfo};
 use std::sync::OnceLock;
+use std::thread::{self, JoinHandle};
+use tokio::runtime::Builder;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -118,6 +121,8 @@ impl std::error::Error for BugfixesError {}
 pub enum ReportError {
     MissingCredentials,
     Http(reqwest::Error),
+    RuntimeInit(String),
+    ThreadJoin,
 }
 
 impl fmt::Display for ReportError {
@@ -127,6 +132,8 @@ impl fmt::Display for ReportError {
                 f.write_str("missing BUGFIXES_AGENT_KEY or BUGFIXES_AGENT_SECRET")
             }
             Self::Http(err) => write!(f, "http error: {err}"),
+            Self::RuntimeInit(err) => write!(f, "runtime init error: {err}"),
+            Self::ThreadJoin => f.write_str("report thread panicked"),
         }
     }
 }
@@ -180,8 +187,8 @@ impl BugfixesLogger {
         Self::new(config)
     }
 
-    pub fn init_global(self) -> Result<&'static Self, Self> {
-        GLOBAL_LOGGER.set(self)?;
+    pub fn init_global(self) -> Result<&'static Self, Box<Self>> {
+        GLOBAL_LOGGER.set(self).map_err(Box::new)?;
         Ok(global_logger())
     }
 
@@ -244,7 +251,7 @@ impl BugfixesLogger {
         }
 
         let bug = build_bug_report(Level::Crash, &message, &stack);
-        self.send_bug(&bug)
+        self.send_bug_blocking(&bug)
     }
 
     pub fn install_panic_hook(&self) {
@@ -260,7 +267,7 @@ impl BugfixesLogger {
     pub fn record(&self, level: Level, message: impl Into<String>) -> LogRecord {
         let location = Location::caller();
         let message = message.into();
-        let stack = level.captures_stack().then(capture_stack);
+        let stack = (!self.config.local_only && level.captures_stack()).then(capture_stack);
         let record = LogRecord {
             log_fmt: render_logfmt(level, location.file(), location.line(), &message),
             log: message,
@@ -279,7 +286,11 @@ impl BugfixesLogger {
     fn emit(&self, level: Level, message: String) -> Result<String, ReportError> {
         let record = self.record(level, message);
         if self.should_report(level) {
-            self.send(&record)?;
+            if level == Level::Fatal {
+                self.send_blocking(&record)?;
+            } else {
+                self.send(&record)?;
+            }
         }
         Ok(format!("{}: {}", level.display_name(), record.log))
     }
@@ -293,7 +304,7 @@ impl BugfixesLogger {
         }
 
         let bug = build_bug_report(Level::Crash, &message, &stack);
-        let _ = self.send_bug(&bug);
+        let _ = self.send_bug_blocking(&bug);
     }
 
     fn should_report(&self, level: Level) -> bool {
@@ -306,39 +317,103 @@ impl BugfixesLogger {
     }
 
     fn send(&self, record: &LogRecord) -> Result<(), ReportError> {
-        if self.config.agent_key.is_empty() || self.config.agent_secret.is_empty() {
-            return Err(ReportError::MissingCredentials);
+        if !self.has_credentials() {
+            return Ok(());
         }
+
+        let logger = self.clone();
+        let record = record.clone();
+        let _ = spawn_report_thread(async move {
+            if let Err(err) = logger.send_async(record).await {
+                eprintln!("bugfixes sendLog: {err}");
+            }
+            Ok(())
+        });
+
+        Ok(())
+    }
+
+    fn send_blocking(&self, record: &LogRecord) -> Result<(), ReportError> {
+        if !self.has_credentials() {
+            return Ok(());
+        }
+
+        let logger = self.clone();
+        let record = record.clone();
+        join_report_thread(spawn_report_thread(async move { logger.send_async(record).await }))
+    }
+
+    fn send_bug(&self, bug: &BugReport) -> Result<(), ReportError> {
+        if !self.has_credentials() {
+            return Ok(());
+        }
+
+        let logger = self.clone();
+        let bug = bug.clone();
+        let _ = spawn_report_thread(async move {
+            if let Err(err) = logger.send_bug_async(bug).await {
+                eprintln!("bugfixes sendBug: {err}");
+            }
+            Ok(())
+        });
+
+        Ok(())
+    }
+
+    fn send_bug_blocking(&self, bug: &BugReport) -> Result<(), ReportError> {
+        if !self.has_credentials() {
+            return Ok(());
+        }
+
+        let logger = self.clone();
+        let bug = bug.clone();
+        join_report_thread(spawn_report_thread(async move { logger.send_bug_async(bug).await }))
+    }
+
+    async fn send_async(&self, record: LogRecord) -> Result<(), ReportError> {
+        self.ensure_credentials()?;
 
         self.client
             .post(self.config.log_endpoint())
             .header("Content-Type", "application/json")
             .header("X-API-KEY", &self.config.agent_key)
             .header("X-API-SECRET", &self.config.agent_secret)
-            .json(record)
+            .json(&record)
             .send()
+            .await
             .map(|_| ())
             .map_err(ReportError::Http)
     }
 
-    fn send_bug(&self, bug: &BugReport) -> Result<(), ReportError> {
-        if self.config.agent_key.is_empty() || self.config.agent_secret.is_empty() {
-            return Err(ReportError::MissingCredentials);
-        }
+    async fn send_bug_async(&self, bug: BugReport) -> Result<(), ReportError> {
+        self.ensure_credentials()?;
 
         self.client
             .post(self.config.bug_endpoint())
             .header("Content-Type", "application/json")
             .header("X-API-KEY", &self.config.agent_key)
             .header("X-API-SECRET", &self.config.agent_secret)
-            .json(bug)
+            .json(&bug)
             .send()
+            .await
             .map(|_| ())
             .map_err(ReportError::Http)
     }
+
+    fn ensure_credentials(&self) -> Result<(), ReportError> {
+        if !self.has_credentials() {
+            return Err(ReportError::MissingCredentials);
+        }
+
+        Ok(())
+    }
+
+    fn has_credentials(&self) -> bool {
+        !self.config.agent_key.is_empty() && !self.config.agent_secret.is_empty()
+    }
 }
 
-pub fn init_global(logger: BugfixesLogger) -> Result<&'static BugfixesLogger, BugfixesLogger> {
+pub fn init_global(logger: BugfixesLogger) -> Result<&'static BugfixesLogger, Box<BugfixesLogger>> {
     logger.init_global()
 }
 
@@ -367,6 +442,22 @@ pub fn local_logger() -> &'static BugfixesLogger {
 
 pub fn install_global_panic_hook() {
     global_logger().install_panic_hook();
+}
+
+fn spawn_report_thread(
+    task: impl Future<Output = Result<(), ReportError>> + Send + 'static,
+) -> JoinHandle<Result<(), ReportError>> {
+    thread::spawn(move || {
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| ReportError::RuntimeInit(err.to_string()))?;
+        runtime.block_on(task)
+    })
+}
+
+fn join_report_thread(handle: JoinHandle<Result<(), ReportError>>) -> Result<(), ReportError> {
+    handle.join().map_err(|_| ReportError::ThreadJoin)?
 }
 
 fn render_logfmt(level: Level, file: &str, line: u32, message: &str) -> String {
@@ -651,7 +742,7 @@ fn split_source_path(source: &str) -> (String, String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, ReportError, build_bug_report,
+        ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, build_bug_report,
         capitalize, color_level_label, colorize, first_source_line, global_logger, init_global,
         level_uses_stdout, local_logger, panic_payload_message, parse_backtrace_function_line,
         parse_backtrace_source_line, parse_bug_line, quote_logfmt, render_logfmt,
@@ -707,12 +798,12 @@ mod tests {
         })
         .expect("logger");
 
-        let err = logger.info("hello").expect_err("missing creds");
-        assert!(matches!(err, ReportError::MissingCredentials));
+        let response = logger.info("hello").expect("best effort");
+        assert_eq!(response, "Info: hello");
     }
 
     #[test]
-    fn record_captures_callsite_and_stack() {
+    fn local_record_skips_stack_capture() {
         let logger = BugfixesLogger::new(Config {
             local_only: true,
             ..Config::default()
@@ -724,6 +815,18 @@ mod tests {
         assert_eq!(record.log, "careful");
         assert!(record.file.ends_with("src/logger.rs"));
         assert!(record.line_number > 0);
+        assert!(record.stack.is_none());
+    }
+
+    #[test]
+    fn remote_record_captures_stack() {
+        let logger = BugfixesLogger::new(Config {
+            local_only: false,
+            ..Config::default()
+        })
+        .expect("logger");
+
+        let record = logger.record(Level::Warn, "careful");
         assert!(record.stack.as_ref().is_some_and(|stack| !stack.is_empty()));
     }
 
@@ -861,5 +964,19 @@ mod tests {
     fn local_logger_always_skips_remote_reporting() {
         let response = local_logger().info("local only").expect("info");
         assert_eq!(response, "Info: local only");
+    }
+
+    #[test]
+    fn local_logger_is_safe_inside_tokio_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let logger = BugfixesLogger::local().expect("logger");
+            let response = logger.info("tokio safe").expect("info");
+            assert_eq!(response, "Info: tokio safe");
+        });
     }
 }

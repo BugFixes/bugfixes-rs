@@ -73,6 +73,7 @@ The crate supports both:
 - explicit logger instances, which are best for libraries and dependency injection
 - global macros, which are the most idiomatic application-facing Rust API
 - `local_logger()`, which is the direct local-only equivalent of Go's `logs.Local()`
+- `local::{...}` macros, which are the local-only namespaced equivalent of the global macros
 
 The macros preserve the Go package's functional intent while fitting normal Rust call patterns:
 
@@ -81,4 +82,11 @@ bugfixes::debug!("loaded {}", 3);
 bugfixes::info!("started");
 bugfixes::warn!("slow request");
 bugfixes::error!("db error: {}", "timeout")?;
+```
+
+For local-only operational noise that should never be sent remotely:
+
+```rust
+let _ = bugfixes::local::info!("server started on {}", ":3000");
+let _ = bugfixes::local::warn!("retry loop is warming up");
 ```

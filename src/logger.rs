@@ -8,6 +8,7 @@ use std::io::{self, IsTerminal, Write};
 use std::panic::{Location, PanicHookInfo};
 use std::sync::OnceLock;
 use std::thread::{self, JoinHandle};
+use time::{OffsetDateTime, UtcOffset};
 use tokio::runtime::Builder;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -340,7 +341,9 @@ impl BugfixesLogger {
 
         let logger = self.clone();
         let record = record.clone();
-        join_report_thread(spawn_report_thread(async move { logger.send_async(record).await }))
+        join_report_thread(spawn_report_thread(async move {
+            logger.send_async(record).await
+        }))
     }
 
     fn send_bug(&self, bug: &BugReport) -> Result<(), ReportError> {
@@ -367,7 +370,9 @@ impl BugfixesLogger {
 
         let logger = self.clone();
         let bug = bug.clone();
-        join_report_thread(spawn_report_thread(async move { logger.send_bug_async(bug).await }))
+        join_report_thread(spawn_report_thread(async move {
+            logger.send_bug_async(bug).await
+        }))
     }
 
     async fn send_async(&self, record: LogRecord) -> Result<(), ReportError> {
@@ -517,12 +522,17 @@ fn capitalize(value: &str) -> String {
 }
 
 fn render_record(record: &LogRecord, use_color: bool) -> String {
+    render_record_with_timestamp(record, use_color, &current_timestamp())
+}
+
+fn render_record_with_timestamp(record: &LogRecord, use_color: bool, timestamp: &str) -> String {
     let mut output = format!(
-        "{}: {} >> {}:{}\n",
+        "{}: {} >> {}:{} >> {}\n",
         color_level_label(&record.level, use_color),
-        record.log,
+        timestamp,
         record.file,
-        record.line_number
+        record.line_number,
+        record.log
     );
 
     if let Some(stack) = &record.stack {
@@ -532,6 +542,23 @@ fn render_record(record: &LogRecord, use_color: bool) -> String {
     }
 
     output
+}
+
+fn current_timestamp() -> String {
+    let now = OffsetDateTime::now_utc();
+    let now = UtcOffset::current_local_offset()
+        .map(|offset| now.to_offset(offset))
+        .unwrap_or(now);
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        now.year(),
+        u8::from(now.month()),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    )
 }
 
 fn level_uses_stdout(level: &str) -> bool {
@@ -742,11 +769,12 @@ fn split_source_path(source: &str) -> (String, String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, build_bug_report,
-        capitalize, color_level_label, colorize, first_source_line, global_logger, init_global,
-        level_uses_stdout, local_logger, panic_payload_message, parse_backtrace_function_line,
-        parse_backtrace_source_line, parse_bug_line, quote_logfmt, render_logfmt,
-        render_pretty_stack, split_function_path, split_source_path,
+        ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, LogRecord, build_bug_report,
+        capitalize, color_level_label, colorize, current_timestamp, first_source_line,
+        global_logger, init_global, level_uses_stdout, local_logger, panic_payload_message,
+        parse_backtrace_function_line, parse_backtrace_source_line, parse_bug_line, quote_logfmt,
+        render_logfmt, render_pretty_stack, render_record_with_timestamp, split_function_path,
+        split_source_path,
     };
     use crate::Config;
 
@@ -945,6 +973,44 @@ mod tests {
         assert!(level_uses_stdout("info"));
         assert!(!level_uses_stdout("warn"));
         assert!(!level_uses_stdout("error"));
+    }
+
+    #[test]
+    fn rendered_records_include_timestamp_before_source_location() {
+        let rendered = render_record_with_timestamp(
+            &LogRecord {
+                log: "server started".to_string(),
+                level: "info".to_string(),
+                file: "src/main.rs".to_string(),
+                line: "42".to_string(),
+                line_number: 42,
+                log_fmt: String::new(),
+                stack: None,
+            },
+            false,
+            "2026-03-23 15:04:05",
+        );
+
+        assert_eq!(
+            rendered,
+            "Info: 2026-03-23 15:04:05 >> src/main.rs:42 >> server started\n"
+        );
+    }
+
+    #[test]
+    fn timestamps_use_go_compatible_local_format() {
+        let timestamp = current_timestamp();
+        let parts: Vec<_> = timestamp.split(' ').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].len(), 10);
+        assert_eq!(parts[1].len(), 8);
+        assert_eq!(parts[0].chars().filter(|&ch| ch == '-').count(), 2);
+        assert_eq!(parts[1].chars().filter(|&ch| ch == ':').count(), 2);
+        assert!(
+            timestamp
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || ch == '-' || ch == ':' || ch == ' ')
+        );
     }
 
     #[test]

@@ -23,12 +23,11 @@ bugfixes = "0.1.0"
 Remote reporting is configured through:
 
 - `BUGFIXES_AGENT_KEY`
-- `BUGFIXES_AGENT_SECRET`
 - `BUGFIXES_LOG_LEVEL`
 - `BUGFIXES_LOCAL_ONLY`
 - `BUGFIXES_SERVER`
 
-If the agent credentials are missing, logs still print locally and remote reporting is skipped.
+If the API key is missing, logs still print locally and remote reporting is skipped.
 
 ## Examples
 

@@ -8,8 +8,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn init_bugfixes() -> Result<(), Box<dyn std::error::Error>> {
-    // Missing credentials do not break startup. Logs still print locally and
-    // remote reporting is skipped until credentials are configured.
+    // Missing API keys do not break startup. Logs still print locally and
+    // remote reporting is skipped until a key is configured.
     bugfixes::init_global_from_env()?;
     bugfixes::install_global_panic_hook();
     Ok(())

@@ -129,9 +129,7 @@ pub enum ReportError {
 impl fmt::Display for ReportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingCredentials => {
-                f.write_str("missing BUGFIXES_AGENT_KEY or BUGFIXES_AGENT_SECRET")
-            }
+            Self::MissingCredentials => f.write_str("missing BUGFIXES_AGENT_KEY"),
             Self::Http(err) => write!(f, "http error: {err}"),
             Self::RuntimeInit(err) => write!(f, "runtime init error: {err}"),
             Self::ThreadJoin => f.write_str("report thread panicked"),
@@ -382,7 +380,6 @@ impl BugfixesLogger {
             .post(self.config.log_endpoint())
             .header("Content-Type", "application/json")
             .header("X-API-KEY", &self.config.agent_key)
-            .header("X-API-SECRET", &self.config.agent_secret)
             .json(&record)
             .send()
             .await
@@ -397,7 +394,6 @@ impl BugfixesLogger {
             .post(self.config.bug_endpoint())
             .header("Content-Type", "application/json")
             .header("X-API-KEY", &self.config.agent_key)
-            .header("X-API-SECRET", &self.config.agent_secret)
             .json(&bug)
             .send()
             .await
@@ -414,7 +410,7 @@ impl BugfixesLogger {
     }
 
     fn has_credentials(&self) -> bool {
-        !self.config.agent_key.is_empty() && !self.config.agent_secret.is_empty()
+        !self.config.agent_key.is_empty()
     }
 }
 
@@ -495,10 +491,17 @@ fn print_record(record: &LogRecord) {
     let output = render_record(record, use_color);
 
     if level_uses_stdout(&record.level) {
-        let _ = io::stdout().write_all(output.as_bytes());
+        let mut stdout = io::stdout();
+        let _ = write_output(&mut stdout, &output);
     } else {
-        let _ = io::stderr().write_all(output.as_bytes());
+        let mut stderr = io::stderr();
+        let _ = write_output(&mut stderr, &output);
     }
+}
+
+fn write_output(mut writer: impl Write, output: &str) -> io::Result<()> {
+    writer.write_all(output.as_bytes())?;
+    writer.flush()
 }
 
 fn print_panic(message: &str, stack: &str) {
@@ -774,9 +777,11 @@ mod tests {
         global_logger, init_global, level_uses_stdout, local_logger, panic_payload_message,
         parse_backtrace_function_line, parse_backtrace_source_line, parse_bug_line, quote_logfmt,
         render_logfmt, render_pretty_stack, render_record_with_timestamp, split_function_path,
-        split_source_path,
+        split_source_path, write_output,
     };
     use crate::Config;
+    use std::cell::Cell;
+    use std::io::{self, Write};
 
     #[test]
     fn level_parsing_matches_go_mapping() {
@@ -819,7 +824,6 @@ mod tests {
     fn logger_remote_requires_credentials() {
         let logger = BugfixesLogger::new(Config {
             agent_key: String::new(),
-            agent_secret: String::new(),
             local_only: false,
             log_level: "info".into(),
             ..Config::default()
@@ -973,6 +977,36 @@ mod tests {
         assert!(level_uses_stdout("info"));
         assert!(!level_uses_stdout("warn"));
         assert!(!level_uses_stdout("error"));
+    }
+
+    #[test]
+    fn write_output_flushes_after_write() {
+        struct RecordingWriter {
+            flushed: Cell<bool>,
+            bytes: Vec<u8>,
+        }
+
+        impl Write for RecordingWriter {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushed.set(true);
+                Ok(())
+            }
+        }
+
+        let mut writer = RecordingWriter {
+            flushed: Cell::new(false),
+            bytes: Vec::new(),
+        };
+
+        write_output(&mut writer, "hello world").expect("write");
+
+        assert_eq!(writer.bytes, b"hello world");
+        assert!(writer.flushed.get());
     }
 
     #[test]

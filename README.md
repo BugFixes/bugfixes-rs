@@ -23,6 +23,7 @@ bugfixes = "0.1.0"
 Remote reporting is configured through:
 
 - `BUGFIXES_AGENT_KEY`
+- `BUGFIXES_AGENT_SECRET`
 - `BUGFIXES_LOG_LEVEL`
 - `BUGFIXES_LOCAL_ONLY`
 - `BUGFIXES_SERVER`

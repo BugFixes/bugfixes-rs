@@ -8,6 +8,7 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 10;
 pub struct Config {
     pub server: String,
     pub agent_key: String,
+    pub agent_secret: String,
     pub log_level: String,
     pub local_only: bool,
     pub timeout: Duration,
@@ -29,6 +30,7 @@ impl Config {
         Self {
             server: env::var("BUGFIXES_SERVER").unwrap_or_else(|_| DEFAULT_SERVER.to_string()),
             agent_key: env::var("BUGFIXES_AGENT_KEY").unwrap_or_default(),
+            agent_secret: env::var("BUGFIXES_AGENT_SECRET").unwrap_or_default(),
             log_level: env::var("BUGFIXES_LOG_LEVEL").unwrap_or_default(),
             local_only,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
@@ -54,6 +56,7 @@ mod tests {
             [
                 "BUGFIXES_SERVER",
                 "BUGFIXES_AGENT_KEY",
+                "BUGFIXES_AGENT_SECRET",
                 "BUGFIXES_LOG_LEVEL",
                 "BUGFIXES_LOCAL_ONLY",
             ],
@@ -61,6 +64,7 @@ mod tests {
                 let cfg = Config::from_env();
                 assert_eq!(cfg.server, DEFAULT_SERVER);
                 assert!(cfg.agent_key.is_empty());
+                assert!(cfg.agent_secret.is_empty());
                 assert!(cfg.log_level.is_empty());
                 assert!(!cfg.local_only);
             },
@@ -73,6 +77,7 @@ mod tests {
             [
                 ("BUGFIXES_SERVER", Some("https://example.test/v1")),
                 ("BUGFIXES_AGENT_KEY", Some("abc")),
+                ("BUGFIXES_AGENT_SECRET", Some("shh")),
                 ("BUGFIXES_LOG_LEVEL", Some("warn")),
                 ("BUGFIXES_LOCAL_ONLY", Some("true")),
             ],
@@ -80,6 +85,7 @@ mod tests {
                 let cfg = Config::from_env();
                 assert_eq!(cfg.server, "https://example.test/v1");
                 assert_eq!(cfg.agent_key, "abc");
+                assert_eq!(cfg.agent_secret, "shh");
                 assert_eq!(cfg.log_level, "warn");
                 assert!(cfg.local_only);
                 assert_eq!(cfg.log_endpoint(), "https://example.test/v1/log");

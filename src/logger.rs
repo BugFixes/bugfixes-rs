@@ -129,7 +129,9 @@ pub enum ReportError {
 impl fmt::Display for ReportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingCredentials => f.write_str("missing BUGFIXES_AGENT_KEY"),
+            Self::MissingCredentials => {
+                f.write_str("missing BUGFIXES_AGENT_KEY or BUGFIXES_AGENT_SECRET")
+            }
             Self::Http(err) => write!(f, "http error: {err}"),
             Self::RuntimeInit(err) => write!(f, "runtime init error: {err}"),
             Self::ThreadJoin => f.write_str("report thread panicked"),
@@ -380,9 +382,11 @@ impl BugfixesLogger {
             .post(self.config.log_endpoint())
             .header("Content-Type", "application/json")
             .header("X-API-KEY", &self.config.agent_key)
+            .header("X-API-SECRET", &self.config.agent_secret)
             .json(&record)
             .send()
             .await
+            .and_then(|response| response.error_for_status())
             .map(|_| ())
             .map_err(ReportError::Http)
     }
@@ -394,9 +398,11 @@ impl BugfixesLogger {
             .post(self.config.bug_endpoint())
             .header("Content-Type", "application/json")
             .header("X-API-KEY", &self.config.agent_key)
+            .header("X-API-SECRET", &self.config.agent_secret)
             .json(&bug)
             .send()
             .await
+            .and_then(|response| response.error_for_status())
             .map(|_| ())
             .map_err(ReportError::Http)
     }
@@ -410,7 +416,7 @@ impl BugfixesLogger {
     }
 
     fn has_credentials(&self) -> bool {
-        !self.config.agent_key.is_empty()
+        !self.config.agent_key.is_empty() && !self.config.agent_secret.is_empty()
     }
 }
 

@@ -27,6 +27,13 @@ Remote reporting is configured through:
 - `BUGFIXES_LOG_LEVEL`
 - `BUGFIXES_LOCAL_ONLY`
 - `BUGFIXES_SERVER`
+- `BUGFIXES_COMMIT_SHA`
+- `BUGFIXES_RELEASE`
+- `BUGFIXES_ENVIRONMENT`
+
+The last three values are optional event metadata and may also be set directly on
+`Config`. The client does not run Git or infer deployment identity from generic
+production flags; deployment configuration supplies the authoritative values.
 
 If the API key is missing, logs still print locally and remote reporting is skipped.
 

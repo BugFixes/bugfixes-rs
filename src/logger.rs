@@ -163,6 +163,22 @@ pub struct BugReport {
     pub level: String,
 }
 
+#[derive(Serialize)]
+struct WirePayload<'a, T> {
+    #[serde(flatten)]
+    payload: &'a T,
+    #[serde(skip_serializing_if = "wire_value_is_empty")]
+    commit_sha: &'a str,
+    #[serde(skip_serializing_if = "wire_value_is_empty")]
+    release: &'a str,
+    #[serde(skip_serializing_if = "wire_value_is_empty")]
+    environment: &'a str,
+}
+
+fn wire_value_is_empty(value: &&str) -> bool {
+    value.is_empty()
+}
+
 static GLOBAL_LOGGER: OnceLock<BugfixesLogger> = OnceLock::new();
 static LOCAL_LOGGER: OnceLock<BugfixesLogger> = OnceLock::new();
 
@@ -383,7 +399,12 @@ impl BugfixesLogger {
             .header("Content-Type", "application/json")
             .header("X-API-KEY", &self.config.agent_key)
             .header("X-API-SECRET", &self.config.agent_secret)
-            .json(&record)
+            .json(&WirePayload {
+                payload: &record,
+                commit_sha: &self.config.commit_sha,
+                release: &self.config.release,
+                environment: &self.config.environment,
+            })
             .send()
             .await
             .and_then(|response| response.error_for_status())
@@ -399,7 +420,12 @@ impl BugfixesLogger {
             .header("Content-Type", "application/json")
             .header("X-API-KEY", &self.config.agent_key)
             .header("X-API-SECRET", &self.config.agent_secret)
-            .json(&bug)
+            .json(&WirePayload {
+                payload: &bug,
+                commit_sha: &self.config.commit_sha,
+                release: &self.config.release,
+                environment: &self.config.environment,
+            })
             .send()
             .await
             .and_then(|response| response.error_for_status())
@@ -778,12 +804,12 @@ fn split_source_path(source: &str) -> (String, String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, LogRecord, build_bug_report,
-        capitalize, color_level_label, colorize, current_timestamp, first_source_line,
-        global_logger, init_global, level_uses_stdout, local_logger, panic_payload_message,
-        parse_backtrace_function_line, parse_backtrace_source_line, parse_bug_line, quote_logfmt,
-        render_logfmt, render_pretty_stack, render_record_with_timestamp, split_function_path,
-        split_source_path, write_output,
+        ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, LogRecord, WirePayload,
+        build_bug_report, capitalize, color_level_label, colorize, current_timestamp,
+        first_source_line, global_logger, init_global, level_uses_stdout, local_logger,
+        panic_payload_message, parse_backtrace_function_line, parse_backtrace_source_line,
+        parse_bug_line, quote_logfmt, render_logfmt, render_pretty_stack,
+        render_record_with_timestamp, split_function_path, split_source_path, write_output,
     };
     use crate::Config;
     use std::cell::Cell;
@@ -800,6 +826,32 @@ mod tests {
         assert_eq!(Level::from("fatal"), Level::Crash);
         assert_eq!(Level::from("10"), Level::Unknown);
         assert_eq!(Level::from("nonsense"), Level::Unknown);
+    }
+
+    #[test]
+    fn wire_payload_carries_explicit_deployment_metadata() {
+        let record = LogRecord {
+            log: "boom".to_string(),
+            level: "error".to_string(),
+            file: "src/main.rs".to_string(),
+            line: "42".to_string(),
+            line_number: 42,
+            log_fmt: String::new(),
+            stack: None,
+        };
+        let value = serde_json::to_value(WirePayload {
+            payload: &record,
+            commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            release: "worker@1.2.3",
+            environment: "development",
+        })
+        .expect("serialize wire payload");
+        assert_eq!(
+            value["commit_sha"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(value["release"], "worker@1.2.3");
+        assert_eq!(value["environment"], "development");
     }
 
     #[test]

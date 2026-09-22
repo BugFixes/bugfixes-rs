@@ -9,6 +9,9 @@ pub struct Config {
     pub server: String,
     pub agent_key: String,
     pub agent_secret: String,
+    pub commit_sha: String,
+    pub release: String,
+    pub environment: String,
     pub log_level: String,
     pub local_only: bool,
     pub timeout: Duration,
@@ -31,6 +34,9 @@ impl Config {
             server: env::var("BUGFIXES_SERVER").unwrap_or_else(|_| DEFAULT_SERVER.to_string()),
             agent_key: env::var("BUGFIXES_AGENT_KEY").unwrap_or_default(),
             agent_secret: env::var("BUGFIXES_AGENT_SECRET").unwrap_or_default(),
+            commit_sha: env::var("BUGFIXES_COMMIT_SHA").unwrap_or_default(),
+            release: env::var("BUGFIXES_RELEASE").unwrap_or_default(),
+            environment: env::var("BUGFIXES_ENVIRONMENT").unwrap_or_default(),
             log_level: env::var("BUGFIXES_LOG_LEVEL").unwrap_or_default(),
             local_only,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
@@ -59,12 +65,18 @@ mod tests {
                 "BUGFIXES_AGENT_SECRET",
                 "BUGFIXES_LOG_LEVEL",
                 "BUGFIXES_LOCAL_ONLY",
+                "BUGFIXES_COMMIT_SHA",
+                "BUGFIXES_RELEASE",
+                "BUGFIXES_ENVIRONMENT",
             ],
             || {
                 let cfg = Config::from_env();
                 assert_eq!(cfg.server, DEFAULT_SERVER);
                 assert!(cfg.agent_key.is_empty());
                 assert!(cfg.agent_secret.is_empty());
+                assert!(cfg.commit_sha.is_empty());
+                assert!(cfg.release.is_empty());
+                assert!(cfg.environment.is_empty());
                 assert!(cfg.log_level.is_empty());
                 assert!(!cfg.local_only);
             },
@@ -80,6 +92,12 @@ mod tests {
                 ("BUGFIXES_AGENT_SECRET", Some("shh")),
                 ("BUGFIXES_LOG_LEVEL", Some("warn")),
                 ("BUGFIXES_LOCAL_ONLY", Some("true")),
+                (
+                    "BUGFIXES_COMMIT_SHA",
+                    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                ),
+                ("BUGFIXES_RELEASE", Some("worker@1.2.3")),
+                ("BUGFIXES_ENVIRONMENT", Some("development")),
             ],
             || {
                 let cfg = Config::from_env();
@@ -88,6 +106,9 @@ mod tests {
                 assert_eq!(cfg.agent_secret, "shh");
                 assert_eq!(cfg.log_level, "warn");
                 assert!(cfg.local_only);
+                assert_eq!(cfg.commit_sha, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                assert_eq!(cfg.release, "worker@1.2.3");
+                assert_eq!(cfg.environment, "development");
                 assert_eq!(cfg.log_endpoint(), "https://example.test/v1/log");
                 assert_eq!(cfg.bug_endpoint(), "https://example.test/v1/bug");
             },

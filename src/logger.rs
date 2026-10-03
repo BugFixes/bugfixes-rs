@@ -167,6 +167,7 @@ pub struct BugReport {
 struct WirePayload<'a, T> {
     #[serde(flatten)]
     payload: &'a T,
+    runtime: &'static str,
     #[serde(skip_serializing_if = "wire_value_is_empty")]
     commit_sha: &'a str,
     #[serde(skip_serializing_if = "wire_value_is_empty")]
@@ -401,6 +402,7 @@ impl BugfixesLogger {
             .header("X-API-SECRET", &self.config.agent_secret)
             .json(&WirePayload {
                 payload: &record,
+                runtime: "rust",
                 commit_sha: &self.config.commit_sha,
                 release: &self.config.release,
                 environment: &self.config.environment,
@@ -422,6 +424,7 @@ impl BugfixesLogger {
             .header("X-API-SECRET", &self.config.agent_secret)
             .json(&WirePayload {
                 payload: &bug,
+                runtime: "rust",
                 commit_sha: &self.config.commit_sha,
                 release: &self.config.release,
                 environment: &self.config.environment,
@@ -841,6 +844,7 @@ mod tests {
         };
         let value = serde_json::to_value(WirePayload {
             payload: &record,
+            runtime: "rust",
             commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             release: "worker@1.2.3",
             environment: "development",
@@ -852,6 +856,7 @@ mod tests {
         );
         assert_eq!(value["release"], "worker@1.2.3");
         assert_eq!(value["environment"], "development");
+        assert_eq!(value["runtime"], "rust");
     }
 
     #[test]

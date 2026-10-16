@@ -174,6 +174,8 @@ struct WirePayload<'a, T> {
     release: &'a str,
     #[serde(skip_serializing_if = "wire_value_is_empty")]
     environment: &'a str,
+    #[serde(skip_serializing_if = "wire_value_is_empty")]
+    service: &'a str,
 }
 
 fn wire_value_is_empty(value: &&str) -> bool {
@@ -406,6 +408,7 @@ impl BugfixesLogger {
                 commit_sha: &self.config.commit_sha,
                 release: &self.config.release,
                 environment: &self.config.environment,
+                service: &self.config.service,
             })
             .send()
             .await
@@ -428,6 +431,7 @@ impl BugfixesLogger {
                 commit_sha: &self.config.commit_sha,
                 release: &self.config.release,
                 environment: &self.config.environment,
+                service: &self.config.service,
             })
             .send()
             .await
@@ -848,6 +852,7 @@ mod tests {
             commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             release: "worker@1.2.3",
             environment: "development",
+            service: "worker",
         })
         .expect("serialize wire payload");
         assert_eq!(
@@ -856,6 +861,7 @@ mod tests {
         );
         assert_eq!(value["release"], "worker@1.2.3");
         assert_eq!(value["environment"], "development");
+        assert_eq!(value["service"], "worker");
         assert_eq!(value["runtime"], "rust");
     }
 

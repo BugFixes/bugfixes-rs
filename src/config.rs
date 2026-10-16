@@ -12,6 +12,7 @@ pub struct Config {
     pub commit_sha: String,
     pub release: String,
     pub environment: String,
+    pub service: String,
     pub log_level: String,
     pub local_only: bool,
     pub timeout: Duration,
@@ -37,6 +38,7 @@ impl Config {
             commit_sha: env::var("BUGFIXES_COMMIT_SHA").unwrap_or_default(),
             release: env::var("BUGFIXES_RELEASE").unwrap_or_default(),
             environment: env::var("BUGFIXES_ENVIRONMENT").unwrap_or_default(),
+            service: env::var("BUGFIXES_SERVICE").unwrap_or_default(),
             log_level: env::var("BUGFIXES_LOG_LEVEL").unwrap_or_default(),
             local_only,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
@@ -68,6 +70,7 @@ mod tests {
                 "BUGFIXES_COMMIT_SHA",
                 "BUGFIXES_RELEASE",
                 "BUGFIXES_ENVIRONMENT",
+                "BUGFIXES_SERVICE",
             ],
             || {
                 let cfg = Config::from_env();
@@ -77,6 +80,7 @@ mod tests {
                 assert!(cfg.commit_sha.is_empty());
                 assert!(cfg.release.is_empty());
                 assert!(cfg.environment.is_empty());
+                assert!(cfg.service.is_empty());
                 assert!(cfg.log_level.is_empty());
                 assert!(!cfg.local_only);
             },
@@ -98,6 +102,7 @@ mod tests {
                 ),
                 ("BUGFIXES_RELEASE", Some("worker@1.2.3")),
                 ("BUGFIXES_ENVIRONMENT", Some("development")),
+                ("BUGFIXES_SERVICE", Some("worker")),
             ],
             || {
                 let cfg = Config::from_env();
@@ -109,6 +114,7 @@ mod tests {
                 assert_eq!(cfg.commit_sha, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
                 assert_eq!(cfg.release, "worker@1.2.3");
                 assert_eq!(cfg.environment, "development");
+                assert_eq!(cfg.service, "worker");
                 assert_eq!(cfg.log_endpoint(), "https://example.test/v1/log");
                 assert_eq!(cfg.bug_endpoint(), "https://example.test/v1/bug");
             },

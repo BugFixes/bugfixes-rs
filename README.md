@@ -30,8 +30,9 @@ Remote reporting is configured through:
 - `BUGFIXES_COMMIT_SHA`
 - `BUGFIXES_RELEASE`
 - `BUGFIXES_ENVIRONMENT`
+- `BUGFIXES_SERVICE`
 
-The last three values are optional event metadata and may also be set directly on
+The last four values are optional event metadata and may also be set directly on
 `Config`. The client does not run Git or infer deployment identity from generic
 production flags; deployment configuration supplies the authoritative values.
 

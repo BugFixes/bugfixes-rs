@@ -6,25 +6,37 @@ use std::fmt;
 use std::future::Future;
 use std::io::{self, IsTerminal, Write};
 use std::panic::{Location, PanicHookInfo};
+use std::str::FromStr;
 use std::sync::OnceLock;
 use std::thread::{self, JoinHandle};
 use time::{OffsetDateTime, UtcOffset};
 use tokio::runtime::Builder;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+/// Severity of a log record, lowest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Level {
+    /// Diagnostic detail. Captures a stack trace.
     Debug,
+    /// General output.
     Log,
+    /// Normal operational messages.
     Info,
+    /// Something unexpected that the program recovered from. Captures a stack trace.
     Warn,
+    /// A failure. Captures a stack trace.
     Error,
+    /// A panic.
     Crash,
+    /// An unrecoverable error; [`BugfixesLogger::fatal`] panics after sending it.
     Fatal,
+    /// A level that is not recognised.
     Unknown,
 }
 
 impl Level {
+    /// The lowercase name sent to Bugfixes, such as `"warn"`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Debug => "debug",
@@ -38,19 +50,7 @@ impl Level {
         }
     }
 
-    pub fn display_name(self) -> &'static str {
-        match self {
-            Self::Debug => "Debug",
-            Self::Log => "Log",
-            Self::Info => "Info",
-            Self::Warn => "Warn",
-            Self::Error => "Error",
-            Self::Crash => "Crash",
-            Self::Fatal => "Fatal",
-            Self::Unknown => "Unknown",
-        }
-    }
-
+    /// The numeric severity Bugfixes uses: 1 (debug) to 6 (crash and fatal), 9 for unknown.
     pub fn numeric(self) -> u8 {
         match self {
             Self::Debug => 1,
@@ -63,6 +63,7 @@ impl Level {
         }
     }
 
+    /// Whether records at this level carry a stack trace when reported.
     pub fn captures_stack(self) -> bool {
         matches!(
             self,
@@ -71,38 +72,57 @@ impl Level {
     }
 }
 
-impl From<&str> for Level {
-    fn from(value: &str) -> Self {
+/// Prints the capitalised name, such as `Warn`.
+impl fmt::Display for Level {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = self.as_str();
+        f.write_str(&name[..1].to_ascii_uppercase())?;
+        f.write_str(&name[1..])
+    }
+}
+
+/// Parses a level name (case-insensitive; `panic` and `fatal` mean
+/// [`Level::Crash`]) or its number, 1 to 6.
+impl FromStr for Level {
+    type Err = ParseLevelError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "debug" => Self::Debug,
-            "log" => Self::Log,
-            "info" => Self::Info,
-            "warn" => Self::Warn,
-            "error" => Self::Error,
-            "crash" | "panic" | "fatal" => Self::Crash,
-            "unknown" => Self::Unknown,
-            other => match other.parse::<u8>() {
-                Ok(level) if level < 9 => match level {
-                    1 => Self::Debug,
-                    2 => Self::Log,
-                    3 => Self::Info,
-                    4 => Self::Warn,
-                    5 => Self::Error,
-                    6 => Self::Crash,
-                    _ => Self::Unknown,
-                },
-                _ => Self::Unknown,
-            },
+            "debug" | "1" => Ok(Self::Debug),
+            "log" | "2" => Ok(Self::Log),
+            "info" | "3" => Ok(Self::Info),
+            "warn" | "4" => Ok(Self::Warn),
+            "error" | "5" => Ok(Self::Error),
+            "crash" | "panic" | "fatal" | "6" => Ok(Self::Crash),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(ParseLevelError),
         }
     }
 }
 
+/// The string given to [`Level::from_str`] is not a level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub struct ParseLevelError;
+
+impl fmt::Display for ParseLevelError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("unrecognised log level")
+    }
+}
+
+impl std::error::Error for ParseLevelError {}
+
+/// The error [`BugfixesLogger::error`] returns, so a logged error can be
+/// propagated with `?`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[must_use]
 pub struct BugfixesError {
     message: String,
 }
 
 impl BugfixesError {
+    /// Creates an error with the given message.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -118,11 +138,18 @@ impl fmt::Display for BugfixesError {
 
 impl std::error::Error for BugfixesError {}
 
+/// Why a record could not be sent to Bugfixes.
 #[derive(Debug)]
+#[must_use]
+#[non_exhaustive]
 pub enum ReportError {
+    /// The agent key or secret is not configured.
     MissingCredentials,
+    /// The request failed or the server rejected it.
     Http(reqwest::Error),
-    RuntimeInit(String),
+    /// The background runtime that sends reports could not start.
+    RuntimeInit(io::Error),
+    /// The background thread that sends reports panicked.
     ThreadJoin,
 }
 
@@ -139,28 +166,54 @@ impl fmt::Display for ReportError {
     }
 }
 
-impl std::error::Error for ReportError {}
+impl std::error::Error for ReportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Http(err) => Some(err),
+            Self::RuntimeInit(err) => Some(err),
+            Self::MissingCredentials | Self::ThreadJoin => None,
+        }
+    }
+}
 
+/// A log line as printed and sent to Bugfixes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct LogRecord {
+    /// The message.
     pub log: String,
-    pub level: String,
+    /// Its severity.
+    pub level: Level,
+    /// Source file of the call.
     pub file: String,
+    /// Source line of the call, as text; the API expects a string here.
     pub line: String,
+    /// Source line of the call.
     pub line_number: u32,
+    /// The record in logfmt form.
     pub log_fmt: String,
+    /// Stack trace, captured for levels that [capture one](Level::captures_stack)
+    /// when remote reporting is on.
     pub stack: Option<String>,
 }
 
+/// A bug sent with [`BugfixesLogger::report_bug`]. Panics are reported this way.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BugReport {
+    /// Human-readable summary with a formatted stack trace.
     pub bug: String,
+    /// The raw stack trace.
     pub raw: String,
+    /// `file:line:column` where the bug happened.
     pub bug_line: String,
+    /// Source file where the bug happened.
     pub file: String,
+    /// Source line where the bug happened, as text; the API expects a string here.
     pub line: String,
+    /// Source line where the bug happened.
     pub line_number: u32,
-    pub level: String,
+    /// Its severity.
+    pub level: Level,
 }
 
 #[derive(Serialize)]
@@ -185,6 +238,11 @@ fn wire_value_is_empty(value: &&str) -> bool {
 static GLOBAL_LOGGER: OnceLock<BugfixesLogger> = OnceLock::new();
 static LOCAL_LOGGER: OnceLock<BugfixesLogger> = OnceLock::new();
 
+/// Prints log records locally and sends them to Bugfixes.
+///
+/// Sending happens on a background thread and never blocks the caller, except
+/// for [`fatal`](Self::fatal) and panics, which wait for the send to finish.
+/// Without an agent key and secret, records are only printed.
 #[derive(Clone)]
 pub struct BugfixesLogger {
     config: Config,
@@ -192,50 +250,61 @@ pub struct BugfixesLogger {
 }
 
 impl BugfixesLogger {
+    /// Creates a logger. Fails only if the HTTP client cannot be built.
     pub fn new(config: Config) -> Result<Self, reqwest::Error> {
         let client = Client::builder().timeout(config.timeout).build()?;
         Ok(Self { config, client })
     }
 
+    /// Creates a logger from [`Config::from_env`].
     pub fn from_env() -> Result<Self, reqwest::Error> {
         Self::new(Config::from_env())
     }
 
-    pub fn local() -> Result<Self, reqwest::Error> {
+    /// Creates a logger from the environment that only prints and never sends.
+    pub fn new_local() -> Result<Self, reqwest::Error> {
         let mut config = Config::from_env();
         config.local_only = true;
         Self::new(config)
     }
 
+    /// Makes this the logger used by the crate's macros. If one is already set,
+    /// it stays and this logger is handed back as the error.
     pub fn init_global(self) -> Result<&'static Self, Box<Self>> {
         GLOBAL_LOGGER.set(self).map_err(Box::new)?;
         Ok(global_logger())
     }
 
+    /// The global logger, if one has been set or created.
     pub fn global() -> Option<&'static Self> {
         GLOBAL_LOGGER.get()
     }
 
+    /// Logs at [`Level::Info`]. Returns the printed line, such as `"Info: message"`.
     #[track_caller]
     pub fn info(&self, message: impl Into<String>) -> Result<String, ReportError> {
         self.emit(Level::Info, message.into())
     }
 
+    /// Logs at [`Level::Debug`]. Returns the printed line, such as `"Debug: message"`.
     #[track_caller]
     pub fn debug(&self, message: impl Into<String>) -> Result<String, ReportError> {
         self.emit(Level::Debug, message.into())
     }
 
+    /// Logs at [`Level::Log`]. Returns the printed line, such as `"Log: message"`.
     #[track_caller]
     pub fn log(&self, message: impl Into<String>) -> Result<String, ReportError> {
         self.emit(Level::Log, message.into())
     }
 
+    /// Logs at [`Level::Warn`]. Returns the printed line, such as `"Warn: message"`.
     #[track_caller]
     pub fn warn(&self, message: impl Into<String>) -> Result<String, ReportError> {
         self.emit(Level::Warn, message.into())
     }
 
+    /// Logs at [`Level::Error`] and returns the message as a [`BugfixesError`].
     #[track_caller]
     pub fn error(&self, message: impl Into<String>) -> Result<BugfixesError, ReportError> {
         let message = message.into();
@@ -243,6 +312,11 @@ impl BugfixesLogger {
         Ok(BugfixesError::new(message))
     }
 
+    /// Logs at [`Level::Fatal`], waits for it to be sent, then panics.
+    ///
+    /// # Panics
+    ///
+    /// Always, with `message`.
     #[track_caller]
     pub fn fatal(&self, message: impl Into<String>) -> ! {
         let message = message.into();
@@ -250,6 +324,7 @@ impl BugfixesLogger {
         panic!("{message}");
     }
 
+    /// Sends a bug report in the background. Does nothing when local-only.
     pub fn report_bug(&self, bug: BugReport) -> Result<(), ReportError> {
         if self.config.local_only {
             return Ok(());
@@ -258,6 +333,8 @@ impl BugfixesLogger {
         self.send_bug(&bug)
     }
 
+    /// Prints and sends a panic caught with [`std::panic::catch_unwind`],
+    /// waiting for the send to finish.
     pub fn report_panic_payload(
         &self,
         payload: &(dyn std::any::Any + Send),
@@ -274,6 +351,8 @@ impl BugfixesLogger {
         self.send_bug_blocking(&bug)
     }
 
+    /// Installs a panic hook that prints and reports every panic, then runs the
+    /// previous hook.
     pub fn install_panic_hook(&self) {
         let logger = self.clone();
         let previous = std::panic::take_hook();
@@ -283,6 +362,7 @@ impl BugfixesLogger {
         }));
     }
 
+    /// Prints a record at `level` without sending it, and returns it.
     #[track_caller]
     pub fn record(&self, level: Level, message: impl Into<String>) -> LogRecord {
         let location = Location::caller();
@@ -291,7 +371,7 @@ impl BugfixesLogger {
         let record = LogRecord {
             log_fmt: render_logfmt(level, location.file(), location.line(), &message),
             log: message,
-            level: level.as_str().to_string(),
+            level,
             file: location.file().to_string(),
             line: location.line().to_string(),
             line_number: location.line(),
@@ -312,7 +392,7 @@ impl BugfixesLogger {
                 self.send(&record)?;
             }
         }
-        Ok(format!("{}: {}", level.display_name(), record.log))
+        Ok(format!("{level}: {}", record.log))
     }
 
     fn report_panic_hook(&self, info: &PanicHookInfo<'_>) {
@@ -332,8 +412,10 @@ impl BugfixesLogger {
             return false;
         }
 
-        let configured = Level::from(self.config.log_level.as_str());
-        configured == Level::Unknown || level.numeric() >= configured.numeric()
+        match self.config.log_level {
+            None | Some(Level::Unknown) => true,
+            Some(minimum) => level.numeric() >= minimum.numeric(),
+        }
     }
 
     fn send(&self, record: &LogRecord) -> Result<(), ReportError> {
@@ -453,20 +535,28 @@ impl BugfixesLogger {
     }
 }
 
+/// Makes `logger` the global logger. See [`BugfixesLogger::init_global`].
 pub fn init_global(logger: BugfixesLogger) -> Result<&'static BugfixesLogger, Box<BugfixesLogger>> {
     logger.init_global()
 }
 
+/// Sets the global logger from the environment, keeping one that is already set.
 pub fn init_global_from_env() -> Result<&'static BugfixesLogger, reqwest::Error> {
     let logger = BugfixesLogger::from_env()?;
     Ok(init_global(logger).unwrap_or_else(|_| global_logger()))
 }
 
+/// Sets a local-only global logger, keeping one that is already set.
 pub fn init_global_local() -> Result<&'static BugfixesLogger, reqwest::Error> {
-    let logger = BugfixesLogger::local()?;
+    let logger = BugfixesLogger::new_local()?;
     Ok(init_global(logger).unwrap_or_else(|_| global_logger()))
 }
 
+/// The global logger, created from the environment on first use.
+///
+/// # Panics
+///
+/// If no logger is set and the HTTP client cannot be built.
 pub fn global_logger() -> &'static BugfixesLogger {
     GLOBAL_LOGGER.get_or_init(|| {
         BugfixesLogger::from_env()
@@ -474,12 +564,22 @@ pub fn global_logger() -> &'static BugfixesLogger {
     })
 }
 
+/// A shared local-only logger, created from the environment on first use.
+///
+/// # Panics
+///
+/// If the HTTP client cannot be built.
 pub fn local_logger() -> &'static BugfixesLogger {
     LOCAL_LOGGER.get_or_init(|| {
-        BugfixesLogger::local().expect("failed to initialize local Bugfixes logger")
+        BugfixesLogger::new_local().expect("failed to initialize local Bugfixes logger")
     })
 }
 
+/// Installs [`BugfixesLogger::install_panic_hook`] for the global logger.
+///
+/// # Panics
+///
+/// See [`global_logger`].
 pub fn install_global_panic_hook() {
     global_logger().install_panic_hook();
 }
@@ -491,7 +591,7 @@ fn spawn_report_thread(
         let runtime = Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|err| ReportError::RuntimeInit(err.to_string()))?;
+            .map_err(ReportError::RuntimeInit)?;
         runtime.block_on(task)
     })
 }
@@ -529,7 +629,7 @@ fn print_record(record: &LogRecord) {
     let use_color = io::stderr().is_terminal();
     let output = render_record(record, use_color);
 
-    if level_uses_stdout(&record.level) {
+    if level_uses_stdout(record.level) {
         let mut stdout = io::stdout();
         let _ = write_output(&mut stdout, &output);
     } else {
@@ -555,14 +655,6 @@ fn print_panic(message: &str, stack: &str) {
     eprint!("{}", render_pretty_stack(stack, use_color));
 }
 
-fn capitalize(value: &str) -> String {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
-        None => String::new(),
-    }
-}
-
 fn render_record(record: &LogRecord, use_color: bool) -> String {
     render_record_with_timestamp(record, use_color, &current_timestamp())
 }
@@ -570,7 +662,7 @@ fn render_record(record: &LogRecord, use_color: bool) -> String {
 fn render_record_with_timestamp(record: &LogRecord, use_color: bool, timestamp: &str) -> String {
     let mut output = format!(
         "{}: {} >> {}:{} >> {}\n",
-        color_level_label(&record.level, use_color),
+        color_level_label(record.level, use_color),
         timestamp,
         record.file,
         record.line_number,
@@ -603,8 +695,8 @@ fn current_timestamp() -> String {
     )
 }
 
-fn level_uses_stdout(level: &str) -> bool {
-    matches!(level, "debug" | "log" | "info")
+fn level_uses_stdout(level: Level) -> bool {
+    matches!(level, Level::Debug | Level::Log | Level::Info)
 }
 
 const ANSI_RESET: &str = "\x1b[0m";
@@ -624,17 +716,16 @@ fn colorize(input: &str, ansi: &str, use_color: bool) -> String {
     }
 }
 
-fn color_level_label(level: &str, use_color: bool) -> String {
-    let label = capitalize(level);
+fn color_level_label(level: Level, use_color: bool) -> String {
     let ansi = match level {
-        "warn" => ANSI_BRIGHT_YELLOW,
-        "info" => ANSI_BRIGHT_CYAN,
-        "log" => ANSI_BRIGHT_GREEN,
-        "debug" => ANSI_BRIGHT_MAGENTA,
-        "error" | "crash" | "fatal" => ANSI_BRIGHT_RED,
-        _ => ANSI_BRIGHT_WHITE,
+        Level::Warn => ANSI_BRIGHT_YELLOW,
+        Level::Info => ANSI_BRIGHT_CYAN,
+        Level::Log => ANSI_BRIGHT_GREEN,
+        Level::Debug => ANSI_BRIGHT_MAGENTA,
+        Level::Error | Level::Crash | Level::Fatal => ANSI_BRIGHT_RED,
+        Level::Unknown => ANSI_BRIGHT_WHITE,
     };
-    colorize(&label, ansi, use_color)
+    colorize(&level.to_string(), ansi, use_color)
 }
 
 fn render_pretty_stack(stack: &str, use_color: bool) -> String {
@@ -679,7 +770,7 @@ fn build_bug_report(level: Level, message: &str, stack: &str) -> BugReport {
         file,
         line,
         line_number,
-        level: level.as_str().to_string(),
+        level,
     }
 }
 
@@ -811,8 +902,8 @@ fn split_source_path(source: &str) -> (String, String, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, LogRecord, WirePayload,
-        build_bug_report, capitalize, color_level_label, colorize, current_timestamp,
+        ANSI_BRIGHT_CYAN, BugReport, BugfixesLogger, Level, LogRecord, ParseLevelError,
+        ReportError, WirePayload, build_bug_report, color_level_label, colorize, current_timestamp,
         first_source_line, global_logger, init_global, level_uses_stdout, local_logger,
         panic_payload_message, parse_backtrace_function_line, parse_backtrace_source_line,
         parse_bug_line, quote_logfmt, render_logfmt, render_pretty_stack,
@@ -820,26 +911,59 @@ mod tests {
     };
     use crate::Config;
     use std::cell::Cell;
+    use std::error::Error;
     use std::io::{self, Write};
 
     #[test]
     fn level_parsing_matches_go_mapping() {
-        assert_eq!(Level::from("debug"), Level::Debug);
-        assert_eq!(Level::from("log"), Level::Log);
-        assert_eq!(Level::from("info"), Level::Info);
-        assert_eq!(Level::from("warn"), Level::Warn);
-        assert_eq!(Level::from("error"), Level::Error);
-        assert_eq!(Level::from("crash"), Level::Crash);
-        assert_eq!(Level::from("fatal"), Level::Crash);
-        assert_eq!(Level::from("10"), Level::Unknown);
-        assert_eq!(Level::from("nonsense"), Level::Unknown);
+        let parse = |value: &str| value.parse::<Level>();
+        assert_eq!(parse("debug"), Ok(Level::Debug));
+        assert_eq!(parse("log"), Ok(Level::Log));
+        assert_eq!(parse(" INFO "), Ok(Level::Info));
+        assert_eq!(parse("warn"), Ok(Level::Warn));
+        assert_eq!(parse("error"), Ok(Level::Error));
+        assert_eq!(parse("crash"), Ok(Level::Crash));
+        assert_eq!(parse("fatal"), Ok(Level::Crash));
+        assert_eq!(parse("4"), Ok(Level::Warn));
+        assert_eq!(parse("10"), Err(ParseLevelError));
+        assert_eq!(parse("nonsense"), Err(ParseLevelError));
+    }
+
+    #[test]
+    fn level_displays_capitalised_and_serializes_lowercase() {
+        assert_eq!(Level::Warn.to_string(), "Warn");
+        assert_eq!(
+            serde_json::to_value(Level::Crash).expect("serialize"),
+            "crash"
+        );
+    }
+
+    #[test]
+    fn log_level_filters_lower_levels() {
+        let logger = |log_level| {
+            BugfixesLogger::new(Config {
+                log_level,
+                ..Config::default()
+            })
+            .expect("logger")
+        };
+        assert!(logger(None).should_report(Level::Debug));
+        assert!(logger(Some(Level::Unknown)).should_report(Level::Debug));
+        assert!(!logger(Some(Level::Warn)).should_report(Level::Info));
+        assert!(logger(Some(Level::Warn)).should_report(Level::Error));
+    }
+
+    #[test]
+    fn runtime_init_error_keeps_its_source() {
+        let err = ReportError::RuntimeInit(io::Error::other("no threads"));
+        assert_eq!(err.source().expect("source").to_string(), "no threads");
     }
 
     #[test]
     fn wire_payload_carries_explicit_deployment_metadata() {
         let record = LogRecord {
             log: "boom".to_string(),
-            level: "error".to_string(),
+            level: Level::Error,
             file: "src/main.rs".to_string(),
             line: "42".to_string(),
             line_number: 42,
@@ -894,7 +1018,7 @@ mod tests {
         let logger = BugfixesLogger::new(Config {
             agent_key: String::new(),
             local_only: false,
-            log_level: "info".into(),
+            log_level: Some(Level::Info),
             ..Config::default()
         })
         .expect("logger");
@@ -912,7 +1036,7 @@ mod tests {
         .expect("logger");
 
         let record = logger.record(Level::Warn, "careful");
-        assert_eq!(record.level, "warn");
+        assert_eq!(record.level, Level::Warn);
         assert_eq!(record.log, "careful");
         assert!(record.file.ends_with("src/logger.rs"));
         assert!(record.line_number > 0);
@@ -970,7 +1094,7 @@ mod tests {
                 file: "/workspace/src/worker.rs".to_string(),
                 line: "42".to_string(),
                 line_number: 42,
-                level: "crash".to_string(),
+                level: Level::Crash,
             }
         );
     }
@@ -1028,24 +1152,18 @@ mod tests {
     }
 
     #[test]
-    fn capitalize_handles_empty_strings() {
-        assert_eq!(capitalize("warn"), "Warn");
-        assert_eq!(capitalize(""), "");
-    }
-
-    #[test]
     fn color_helpers_fall_back_without_tty() {
         assert_eq!(colorize("Info", ANSI_BRIGHT_CYAN, false), "Info");
-        assert_eq!(color_level_label("info", false), "Info");
+        assert_eq!(color_level_label(Level::Info, false), "Info");
     }
 
     #[test]
     fn info_levels_use_stdout() {
-        assert!(level_uses_stdout("debug"));
-        assert!(level_uses_stdout("log"));
-        assert!(level_uses_stdout("info"));
-        assert!(!level_uses_stdout("warn"));
-        assert!(!level_uses_stdout("error"));
+        assert!(level_uses_stdout(Level::Debug));
+        assert!(level_uses_stdout(Level::Log));
+        assert!(level_uses_stdout(Level::Info));
+        assert!(!level_uses_stdout(Level::Warn));
+        assert!(!level_uses_stdout(Level::Error));
     }
 
     #[test]
@@ -1083,7 +1201,7 @@ mod tests {
         let rendered = render_record_with_timestamp(
             &LogRecord {
                 log: "server started".to_string(),
-                level: "info".to_string(),
+                level: Level::Info,
                 file: "src/main.rs".to_string(),
                 line: "42".to_string(),
                 line_number: 42,
@@ -1143,7 +1261,7 @@ mod tests {
             .expect("runtime");
 
         runtime.block_on(async {
-            let logger = BugfixesLogger::local().expect("logger");
+            let logger = BugfixesLogger::new_local().expect("logger");
             let response = logger.info("tokio safe").expect("info");
             assert_eq!(response, "Info: tokio safe");
         });

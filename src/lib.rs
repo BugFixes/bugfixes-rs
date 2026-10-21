@@ -1,10 +1,33 @@
+//! Logging client for [Bugfixes](https://bugfix.es).
+//!
+//! Records print locally with their file and line. When an agent key and
+//! secret are configured, they are also sent to Bugfixes, along with panics.
+//!
+//! ```no_run
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Reads BUGFIXES_AGENT_KEY, BUGFIXES_AGENT_SECRET and the other
+//!     // BUGFIXES_* variables. Without credentials, logs only print.
+//!     bugfixes::init_global_from_env()?;
+//!     bugfixes::install_global_panic_hook();
+//!
+//!     bugfixes::info!("server starting on {}", ":3000")?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Use [`BugfixesLogger`] directly to pass a logger around instead of using
+//! the global one, and the [`local`] macros for output that is never sent.
+
+#![warn(missing_docs)]
+
 mod config;
 mod logger;
 
 pub use config::{Config, DEFAULT_SERVER};
 pub use logger::{
-    BugReport, BugfixesError, BugfixesLogger, Level, LogRecord, ReportError, global_logger,
-    init_global, init_global_from_env, init_global_local, install_global_panic_hook, local_logger,
+    BugReport, BugfixesError, BugfixesLogger, Level, LogRecord, ParseLevelError, ReportError,
+    global_logger, init_global, init_global_from_env, init_global_local, install_global_panic_hook,
+    local_logger,
 };
 
 #[doc(hidden)]
@@ -13,6 +36,7 @@ pub mod __private {
     pub use crate::local_logger;
 }
 
+/// Formats a message and logs it at [`Level::Debug`] with the global logger.
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {{
@@ -20,6 +44,7 @@ macro_rules! debug {
     }};
 }
 
+/// Formats a message and logs it at [`Level::Log`] with the global logger.
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
@@ -27,6 +52,7 @@ macro_rules! log {
     }};
 }
 
+/// Formats a message and logs it at [`Level::Info`] with the global logger.
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {{
@@ -34,6 +60,7 @@ macro_rules! info {
     }};
 }
 
+/// Formats a message and logs it at [`Level::Warn`] with the global logger.
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {{
@@ -41,6 +68,7 @@ macro_rules! warn {
     }};
 }
 
+/// Formats a message and logs it at [`Level::Error`] with the global logger. Returns a [`BugfixesError`] to propagate.
 #[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => {{
@@ -48,6 +76,7 @@ macro_rules! error {
     }};
 }
 
+/// Formats a message and logs it at [`Level::Fatal`] with the global logger. Panics after sending.
 #[macro_export]
 macro_rules! fatal {
     ($($arg:tt)*) => {{
@@ -55,6 +84,7 @@ macro_rules! fatal {
     }};
 }
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! __bugfixes_local_debug {
     ($($arg:tt)*) => {{
@@ -62,6 +92,7 @@ macro_rules! __bugfixes_local_debug {
     }};
 }
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! __bugfixes_local_log {
     ($($arg:tt)*) => {{
@@ -69,6 +100,7 @@ macro_rules! __bugfixes_local_log {
     }};
 }
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! __bugfixes_local_info {
     ($($arg:tt)*) => {{
@@ -76,6 +108,7 @@ macro_rules! __bugfixes_local_info {
     }};
 }
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! __bugfixes_local_warn {
     ($($arg:tt)*) => {{
@@ -83,6 +116,7 @@ macro_rules! __bugfixes_local_warn {
     }};
 }
 
+#[doc(hidden)]
 #[macro_export]
 macro_rules! __bugfixes_local_error {
     ($($arg:tt)*) => {{
@@ -90,6 +124,7 @@ macro_rules! __bugfixes_local_error {
     }};
 }
 
+/// Macros that log with [`local_logger`], which only prints and never sends.
 pub mod local {
     pub use crate::__bugfixes_local_debug as debug;
     pub use crate::__bugfixes_local_error as error;

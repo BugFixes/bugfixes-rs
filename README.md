@@ -97,7 +97,7 @@ Use local-only logging when a message should never be sent remotely:
 use bugfixes::{BugfixesLogger, init_global_local, local_logger};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    BugfixesLogger::local()?.info("warming cache")?;
+    BugfixesLogger::new_local()?.info("warming cache")?;
     local_logger().warn("retry loop is still booting")?;
 
     init_global_local()?;
